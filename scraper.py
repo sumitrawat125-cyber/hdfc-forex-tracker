@@ -1,8 +1,9 @@
 import sqlite3
 import pandas as pd
 import requests
-from bs4 import BeautifulSoup
+import tabula
 from datetime import datetime
+import io
 
 def init_database():
     """Initialize SQLite database"""
@@ -24,27 +25,29 @@ def init_database():
     print("✅ Database initialized")
 
 def scrape_hdfc_rates():
-    """Scrape HDFC forex rates"""
+    """Scrape HDFC GIFT City forex rates from PDF"""
     try:
-        url = "https://www.hdfcbank.com/personal/resources/learning-centre/forex/treasury-forex-card-rates"
+        # Correct PDF URL
+        url = "https://www.hdfcgiftcity.bank.in/content/dam/hdfc-bank-offshore-sites/gc/en/home-page/pdfs/forex-card-rates.pdf"
         
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-        }
+        print(f"📥 Downloading PDF from: {url}")
         
-        response = requests.get(url, headers=headers, timeout=15)
-        response.raise_for_status()
+        # Read PDF tables using tabula
+        tables = tabula.read_pdf(url, pages='all', multiple_tables=True)
         
-        # Parse HTML table
-        tables = pd.read_html(response.text)
-        
-        if tables:
-            df = tables[0]
-            print(f"✅ Scraped {len(df)} currency pairs")
-            return df
-        else:
-            print("❌ No tables found")
+        if not tables:
+            print("❌ No tables found in PDF")
             return None
+        
+        # Find the main rates table (usually the first large table)
+        for table in tables:
+            if len(table.columns) >= 3 and len(table) > 10:
+                df = table
+                print(f"✅ Found table with {len(df)} rows")
+                return df
+        
+        print("❌ Could not find rates table")
+        return None
             
     except Exception as e:
         print(f"❌ Scraping error: {e}")
@@ -63,28 +66,44 @@ def store_rates(rates_df):
     timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     
     count = 0
+    
+    # Try to identify column names (they vary in PDF structure)
     for index, row in rates_df.iterrows():
         try:
-            # Adjust column names based on actual table structure
-            currency_pair = row.get('Currency Pair', None)
-            tt_buying = row.get('T.T Buying(Inw Rem)', None)
-            tt_selling = row.get('T.T Selling(O / w Rem)', None)
-            
-            if currency_pair:
-                cursor.execute('''
-                    INSERT OR REPLACE INTO forex_rates 
-                    (date, currency_pair, tt_buying, tt_selling, timestamp)
-                    VALUES (?, ?, ?, ?, ?)
-                ''', (today, currency_pair, tt_buying, tt_selling, timestamp))
-                count += 1
+            # Extract currency pair and rates
+            # Adjust these column indices based on actual PDF structure
+            if len(row) >= 3:
+                currency_pair = str(row.iloc[0]).strip()
+                
+                # Skip header rows
+                if 'Currency' in currency_pair or 'Pair' in currency_pair:
+                    continue
+                
+                # Try to extract buying and selling rates
+                tt_buying = None
+                tt_selling = None
+                
+                try:
+                    tt_buying = float(row.iloc[1])
+                    tt_selling = float(row.iloc[2])
+                except:
+                    continue
+                
+                if currency_pair and tt_buying and tt_selling:
+                    cursor.execute('''
+                        INSERT OR REPLACE INTO forex_rates 
+                        (date, currency_pair, tt_buying, tt_selling, timestamp)
+                        VALUES (?, ?, ?, ?, ?)
+                    ''', (today, currency_pair, tt_buying, tt_selling, timestamp))
+                    count += 1
         except Exception as e:
-            print(f"⚠️ Error inserting row {index}: {e}")
+            continue
     
     conn.commit()
     conn.close()
     
     print(f"✅ Stored {count} rates for {today}")
-    return True
+    return count > 0
 
 def main():
     """Main execution function"""
