@@ -3,7 +3,6 @@ import pandas as pd
 import requests
 import tabula
 from datetime import datetime
-import io
 
 def init_database():
     """Initialize SQLite database"""
@@ -27,27 +26,61 @@ def init_database():
 def scrape_hdfc_rates():
     """Scrape HDFC GIFT City forex rates from PDF"""
     try:
-        # Correct PDF URL
         url = "https://www.hdfcgiftcity.bank.in/content/dam/hdfc-bank-offshore-sites/gc/en/home-page/pdfs/forex-card-rates.pdf"
         
         print(f"📥 Downloading PDF from: {url}")
         
-        # Read PDF tables using tabula
-        tables = tabula.read_pdf(url, pages='all', multiple_tables=True)
+        # Read PDF tables
+        tables = tabula.read_pdf(url, pages='all', multiple_tables=False, lattice=True)
         
         if not tables:
             print("❌ No tables found in PDF")
             return None
         
-        # Find the main rates table (usually the first large table)
-        for table in tables:
-            if len(table.columns) >= 3 and len(table) > 10:
-                df = table
-                print(f"✅ Found table with {len(df)} rows")
-                return df
+        # Get the main table
+        df = tables[0]
+        print(f"✅ Found table with {len(df)} rows and {len(df.columns)} columns")
         
-        print("❌ Could not find rates table")
-        return None
+        # The PDF has 3 sets of currency pairs in columns:
+        # Columns 0-2: First set
+        # Columns 3-5: Second set  
+        # Columns 6-8: Third set (THIS IS WHAT YOU WANT - has INR pairs!)
+        
+        all_rates = []
+        
+        # Extract from columns 6, 7, 8 (7th, 8th, 9th columns - INR pairs)
+        if len(df.columns) >= 9:
+            for index, row in df.iterrows():
+                try:
+                    # Column 6 = Currency Pair, Column 7 = TT Buying, Column 8 = TT Selling
+                    currency_pair = str(row.iloc[6]).strip()
+                    
+                    # Skip headers and invalid rows
+                    if 'Currency' in currency_pair or 'Pair' in currency_pair or currency_pair == 'nan':
+                        continue
+                    
+                    try:
+                        tt_buying = float(row.iloc[7])
+                        tt_selling = float(row.iloc[8])
+                        
+                        if currency_pair and tt_buying > 0 and tt_selling > 0:
+                            all_rates.append({
+                                'currency_pair': currency_pair,
+                                'tt_buying': tt_buying,
+                                'tt_selling': tt_selling
+                            })
+                    except:
+                        continue
+                except:
+                    continue
+        
+        if all_rates:
+            result_df = pd.DataFrame(all_rates)
+            print(f"✅ Extracted {len(result_df)} currency pairs from columns 7-9")
+            return result_df
+        else:
+            print("❌ No valid rates found")
+            return None
             
     except Exception as e:
         print(f"❌ Scraping error: {e}")
@@ -67,37 +100,16 @@ def store_rates(rates_df):
     
     count = 0
     
-    # Try to identify column names (they vary in PDF structure)
     for index, row in rates_df.iterrows():
         try:
-            # Extract currency pair and rates
-            # Adjust these column indices based on actual PDF structure
-            if len(row) >= 3:
-                currency_pair = str(row.iloc[0]).strip()
-                
-                # Skip header rows
-                if 'Currency' in currency_pair or 'Pair' in currency_pair:
-                    continue
-                
-                # Try to extract buying and selling rates
-                tt_buying = None
-                tt_selling = None
-                
-                try:
-                    tt_buying = float(row.iloc[1])
-                    tt_selling = float(row.iloc[2])
-                except:
-                    continue
-                
-                if currency_pair and tt_buying and tt_selling:
-                    cursor.execute('''
-                        INSERT OR REPLACE INTO forex_rates 
-                        (date, currency_pair, tt_buying, tt_selling, timestamp)
-                        VALUES (?, ?, ?, ?, ?)
-                    ''', (today, currency_pair, tt_buying, tt_selling, timestamp))
-                    count += 1
+            cursor.execute('''
+                INSERT OR REPLACE INTO forex_rates 
+                (date, currency_pair, tt_buying, tt_selling, timestamp)
+                VALUES (?, ?, ?, ?, ?)
+            ''', (today, row['currency_pair'], row['tt_buying'], row['tt_selling'], timestamp))
+            count += 1
         except Exception as e:
-            continue
+            print(f"⚠️ Error storing {row['currency_pair']}: {e}")
     
     conn.commit()
     conn.close()
@@ -110,13 +122,9 @@ def main():
     print("🚀 Starting forex rate scraper...")
     print(f"📅 Date: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     
-    # Initialize database
     init_database()
-    
-    # Scrape rates
     rates_df = scrape_hdfc_rates()
     
-    # Store in database
     if rates_df is not None:
         success = store_rates(rates_df)
         if success:
