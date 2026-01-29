@@ -3,15 +3,30 @@ name: Daily HDFC Forex Rate Scraper
 on:
   schedule:
     - cron: '0 4 * * *'  # 9:30 AM IST = 4:00 AM UTC
-  workflow_dispatch:  # Manual trigger button
+  workflow_dispatch:  # Manual trigger
 
 jobs:
   scrape-and-store:
     runs-on: ubuntu-latest
     
+    permissions:
+      contents: write  # Explicitly allow writing
+    
     steps:
     - name: Checkout repository
       uses: actions/checkout@v3
+      with:
+        token: ${{ secrets.GITHUB_TOKEN }}
+        persist-credentials: true
+    
+    - name: Debug - Show environment
+      run: |
+        echo "=== Workflow Info ==="
+        echo "UTC: $(date -u)"
+        echo "IST: $(TZ='Asia/Kolkata' date)"
+        echo "Working directory: $(pwd)"
+        echo "Files: $(ls -la)"
+        echo "==================="
       
     - name: Set up Python
       uses: actions/setup-python@v4
@@ -21,16 +36,37 @@ jobs:
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
-        pip install pandas requests beautifulsoup4 lxml tabula-py
+        if [ -f requirements.txt ]; then
+          pip install -r requirements.txt
+        else
+          pip install pandas requests beautifulsoup4 lxml tabula-py
+        fi
         
     - name: Run forex scraper
       run: |
+        echo "Starting scraper..."
         python scraper.py
+        echo "Scraper completed"
+        
+    - name: Verify data
+      run: |
+        echo "Checking for changes..."
+        ls -lh *.db 2>/dev/null || echo "No database files found"
+        git status
         
     - name: Commit and push changes
       run: |
         git config --local user.email "action@github.com"
         git config --local user.name "GitHub Action"
-        git add forex_rates.db
-        git diff --quiet && git diff --staged --quiet || git commit -m "Auto-update forex rates $(date +'%Y-%m-%d %H:%M:%S')"
-        git push
+        
+        # Add all changes
+        git add -A
+        
+        # Check if there are staged changes
+        if git diff --staged --quiet; then
+          echo "✅ No changes to commit"
+        else
+          git commit -m "Auto-update forex rates - $(TZ='Asia/Kolkata' date '+%Y-%m-%d %I:%M %p IST')"
+          git push
+          echo "✅ Changes pushed successfully!"
+        fi
